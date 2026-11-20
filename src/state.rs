@@ -143,3 +143,83 @@ pub fn hex_to_rgb(value: &str) -> [u8; 3] {
     if v.len() != 6 { return [44, 56, 68] }
     let p = |i: usize| u8::from_str_radix(&v[i..i + 2], 16).unwrap_or(0); [p(0), p(2), p(4)]
 }
+// =====================[ POINTER STREAM ]=====================
+#[derive(Debug, Clone)] pub struct PointerPoint { pub t: i64, pub x: f32, pub y: f32 }
+// =====================[ SNAPSHOT ]=====================
+#[derive(Debug, Clone)] pub struct Snapshot { pub t: i64, pub ev_idx: usize, pub sid: String, pub slide_url: String, pub bg_color: [u8; 3], pub bg_image_url: String, pub color: [u8; 3], pub mode: String, pub pen_scale: f32, pub eraser_scale: f32, pub pan: (f32, f32), pub zoom: f32, pub rotation: f32, pub gif_url: String, pub screen_share: bool }
+// =====================[ TIMELINE ]=====================
+pub struct Timeline { pub events: Vec<Event>, pub pointer_stream: Vec<PointerPoint>, pub snapshots: Vec<Snapshot>, pub max_t: i64, pub record_start_ms: i64 }
+// =====================[ TIMELINE BUILD ]=====================
+impl Timeline {
+    pub fn build(events: Vec<Event>) -> Self {
+        let pointer_stream: Vec<PointerPoint> = events.iter().filter(|e| matches!(e.kind.as_str(), CW_DOWN | CW_MOVE | CW_UP | CW_POINTER) && e.plugin == P_CANVAS).filter_map(|e| { let p = e.point()?; Some(PointerPoint { t: e.p_time, x: p.0, y: p.1 }) }).collect();
+        let max_t = events.last().map(|e| e.p_time).unwrap_or(0);
+        let mut record_start_ms = -1i64;
+        for ev in &events { if ev.plugin == P_MAIN && ev.kind == "cp" { if let Some(ct) = ev.payload.get("ct").and_then(as_i64) { if ct > 0 { record_start_ms = ct - (ev.p_time / 1000); break } } } }
+        let mut snapshots = Vec::new(); let mut state = Snapshot { t: 0, ev_idx: 0, sid: "init".into(), slide_url: String::new(), bg_color: [17, 17, 24], bg_image_url: String::new(), color: hex_to_rgb(DEFAULT_COLOR), mode: MARKER.into(), pen_scale: 1.0, eraser_scale: 1.0, pan: (0.0, 0.0), zoom: 1.0, rotation: 0.0, gif_url: String::new(), screen_share: false };
+        let mut next_snap = 0i64;
+        for (i, ev) in events.iter().enumerate() {
+            while ev.p_time >= next_snap && next_snap <= max_t + 10_000_000 { snapshots.push(Snapshot { t: next_snap, ev_idx: i, ..state.clone() }); next_snap += 10_000_000 }
+            match (ev.plugin.as_str(), ev.kind.as_str()) {
+                (P_DOC, DC_SHOW_SLIDE) => { if let Some(s) = ev.i("s") { state.sid = ev.s("uid").unwrap_or("").to_string(); state.slide_url = ev.s("u").unwrap_or("").to_string(); state.bg_color = ev.s("bc").map(hex_to_rgb).unwrap_or([255, 255, 255]); state.bg_image_url = ev.s("bg").unwrap_or("").to_string(); state.rotation = 0.0; state.gif_url.clear() } }
+                (P_DOC, DC_BG_COLOR) => { if let Some(c) = ev.s("c").or_else(|| ev.s("bc")) { state.bg_color = hex_to_rgb(c) } if let Some(bg) = ev.s("bg") { state.bg_image_url = bg.to_string() } }
+                (P_DOC, DC_COLOR) => { if let Some(c) = ev.s("c") { state.color = hex_to_rgb(c) } }
+                (P_DOC, DC_MODE) => { if let Some(m) = ev.s("m") { state.mode = m.to_string() } }
+                (P_DOC, DC_PEN_SIZE) => { if let Some(s) = ev.f("s") { state.pen_scale = s as f32 } }
+                (P_DOC, DC_ERASER_SIZE) => { if let Some(s) = ev.f("s") { state.eraser_scale = s as f32 } }
+                (P_DOC, DC_ROTATE) => { state.rotation = ev.f("v").unwrap_or(0.0) as f32 }
+                (P_DOC, DC_PLAY_GIF) => { state.gif_url = ev.s("v").unwrap_or("").to_string() }
+                (P_DOC, DC_SCREEN_SHARE) => { state.screen_share = ev.payload.get("v").and_then(|v| v.as_bool()).unwrap_or(false) }
+                (P_CANVAS, CW_ZOOM) => { state.zoom = ev.f("v").unwrap_or(1.0) as f32 }
+                (P_CANVAS, CW_PAN) => { if let Some(v) = ev.payload.get("v") { state.pan = (v.get("x").and_then(as_f64).unwrap_or(0.0) as f32, v.get("y").and_then(as_f64).unwrap_or(0.0) as f32) } }
+                _ => {}
+            }
+        }
+        if snapshots.is_empty() { snapshots.push(Snapshot { t: 0, ev_idx: 0, ..state }) }
+        Timeline { events, pointer_stream, snapshots, max_t, record_start_ms }
+    }
+}
+// =====================[ POINTER INTERP ]=====================
+pub fn interpolate_pointer(stream: &[PointerPoint], target_us: i64, hide_us: i64) -> Option<(f32, f32)> {
+    if stream.is_empty() { return None }
+    let mut lo = 0usize; let mut hi = stream.len();
+    while lo < hi { let mid = (lo + hi) / 2; if stream[mid].t < target_us { lo = mid + 1 } else { hi = mid } }
+    if lo == 0 { return if target_us - stream[0].t <= hide_us { Some((stream[0].x, stream[0].y)) } else { None } }
+    let p0 = &stream[lo - 1];
+    if target_us - p0.t > hide_us { return None }
+    if lo >= stream.len() { return Some((p0.x, p0.y)) }
+    let p1 = &stream[lo];
+    if p1.t == p0.t { return Some((p0.x, p0.y)) }
+    let ratio = (target_us - p0.t) as f32 / (p1.t - p0.t) as f32;
+    Some((p0.x + (p1.x - p0.x) * ratio, p0.y + (p1.y - p0.y) * ratio))
+}
+// =====================[ DO SEEK ]=====================
+pub fn do_seek(timeline: &Timeline, target_us: i64) -> ReplayState {
+    let snap_idx = ((target_us.max(0) / 10_000_000) as usize).min(timeline.snapshots.len().saturating_sub(1));
+    let snap = &timeline.snapshots[snap_idx];
+    let mut state = ReplayState::new();
+    state.slide_sid = snap.sid.clone(); state.bg_color = snap.bg_color; state.bg_image_url = snap.bg_image_url.clone(); state.color = snap.color; state.mode = snap.mode.clone(); state.pen_scale = snap.pen_scale; state.eraser_scale = snap.eraser_scale; state.rotation = snap.rotation; state.gif_url = snap.gif_url.clone(); state.screen_share = snap.screen_share;
+    for i in snap.ev_idx..timeline.events.len() { let ev = &timeline.events[i]; if ev.p_time > target_us { break } apply_event(&mut state, ev) }
+    let cur_canvas = state.canvases.get(&state.current_slide);
+    if let Some(cv) = cur_canvas { let mut c = cv.clone(); c.zoom = snap.zoom; c.pan = snap.pan; state.canvases.insert(state.current_slide, c) }
+    state.t_us = target_us; state.applied = timeline.events.iter().position(|e| e.p_time > target_us).unwrap_or(timeline.events.len());
+    state
+}
+// =====================[ TICK DRAW ]=====================
+pub fn tick_draw(state: &mut ReplayState, events: &[Event], target_us: i64) -> bool {
+    let mut needs_redraw = false;
+    while state.applied < events.len() { let ev = events[state.applied].clone(); if ev.p_time > target_us { break } apply_event(state, &ev); state.applied += 1 }
+    state.t_us = target_us;
+    if let Some(cv) = state.canvases.get(&state.current_slide) { if cv.revision != 0 { needs_redraw = true } }
+    needs_redraw
+}
+// =====================[ VIEWPORT CLAMP ]=====================
+pub fn clamp_viewport(zoom: &mut f32, pan: &mut (f32, f32)) {
+    if *zoom < 1.0 { *zoom = 1.0 } if *zoom > 5.0 { *zoom = 5.0 }
+    if pan.0 > 0.0 { pan.0 = 0.0 } if pan.1 > 0.0 { pan.1 = 0.0 }
+    if pan.0 < 1.0 - *zoom { pan.0 = 1.0 - *zoom } if pan.1 < 1.0 - *zoom { pan.1 = 1.0 - *zoom }
+}
+// =====================[ PROJECT POINT ]=====================
+pub fn project_point(x: f32, y: f32, zoom: f32, pan: (f32, f32), w: f32, h: f32) -> (f32, f32) { (x * zoom + pan.0 * w, y * zoom + pan.1 * h) }
+// =====================[ TRANSFORM OF ]=====================
+pub fn transform_of(zoom: f32, pan: (f32, f32)) -> (f32, f32, f32) { if zoom <= 1.0 + 1e-6 { return (1.0, 0.0, 0.0) } let limit = 0.5 * (zoom - 1.0); let clamp = |v: f32| v.clamp(-limit, limit); (zoom, clamp(pan.0 * zoom), clamp(pan.1 * zoom)) }

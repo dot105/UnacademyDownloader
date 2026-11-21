@@ -90,7 +90,8 @@ fn slides_shown(events: &[Event], start: f64, end: f64) -> Vec<String> {
     for ev in events {
         if ev.plugin == P_DOC && ev.kind == "sc" && ev.p_time >= lo && ev.p_time <= hi {
             if let Some(idx) = ev.i("s") {
-                push(final_state.slides.get(&idx).and_then(|s| s.url.as_ref()));
+                let resolved = final_state.slide_registry.get(&idx).and_then(|&pos| final_state.slides.get(pos)).and_then(|s| s.url.as_ref());
+                push(resolved);
             }
         }
     }

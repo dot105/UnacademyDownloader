@@ -11,7 +11,7 @@ pub mod state;
 pub mod yuv;
 // =====================[ IMPORTS ]=====================
 use std::ffi::{c_char, c_int, CStr, CString};
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;

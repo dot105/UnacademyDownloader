@@ -168,7 +168,7 @@ pub fn run_with_args(mut args: Args) -> Result<()> {
     Ok(())
 }
 // =====================[ RUN MEDIA ]=====================
-pub fn run_media(webm_url: &str, filename: &str, out_dir: PathBuf) -> Result<()> {
+pub fn run_media(webm_url: &str, filename: &str, out_dir: PathBuf, fps: f64) -> Result<()> {
     let media_uid = webm_url.split("lesson-raw/").nth(1).and_then(|r| r.split('/').next()).filter(|s| s.len() >= 8).ok_or_else(|| anyhow::anyhow!("no media uid in url: {webm_url}"))?.to_string();
     let data_url = format!("https://player.uacdn.net/lesson-raw/{media_uid}/data.json");
     std::fs::create_dir_all(&out_dir)?;
@@ -204,8 +204,8 @@ pub fn run_media(webm_url: &str, filename: &str, out_dir: PathBuf) -> Result<()>
     let jobs = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let width = 1280;
     let height = ((width as f64 * 9.0 / 16.0).round() as u32) & !1;
-    let opts = export::Options { fps: 12.0, width, height, crf: 28, preset: "superfast".into(), pip: true, zoom: true, start: 0.0, end: None, ..Default::default() };
-    rep.say(&format!("Rendering board at {width}x{height} @ 12fps on {jobs} threads ..."));
+    let opts = export::Options { fps, width, height, crf: 28, preset: "superfast".into(), pip: true, zoom: true, start: 0.0, end: None, ..Default::default() };
+    rep.say(&format!("Rendering board at {width}x{height} @ {}fps on {jobs} threads ...", trim_num(fps)));
     let slides = SlideCache::new(width);
     let started = Instant::now();
     export::export(&events, &final_mp4, Some(&webm), &opts, duration, jobs, &slides, |done, total| {
@@ -251,7 +251,7 @@ pub extern "C" fn uadl_download(url: *const c_char, token: *const c_char, out_di
 }
 // =====================[ DOWNLOAD MEDIA ]=====================
 #[no_mangle]
-pub extern "C" fn uadl_download_media(webm_url: *const c_char, filename: *const c_char, out_dir: *const c_char) -> c_int {
+pub extern "C" fn uadl_download_media(webm_url: *const c_char, filename: *const c_char, out_dir: *const c_char, fps: f64) -> c_int {
     if webm_url.is_null() || filename.is_null() || out_dir.is_null() {
         set_error("null pointer passed to uadl_download_media".into());
         return -1;
@@ -259,7 +259,8 @@ pub extern "C" fn uadl_download_media(webm_url: *const c_char, filename: *const 
     let webm_url = unsafe { CStr::from_ptr(webm_url) }.to_string_lossy().to_string();
     let filename = unsafe { CStr::from_ptr(filename) }.to_string_lossy().to_string();
     let out_dir = unsafe { CStr::from_ptr(out_dir) }.to_string_lossy().to_string();
-    match run_media(&webm_url, &filename, PathBuf::from(out_dir)) {
+    let fps = if fps > 0.0 { fps } else { 12.0 };
+    match run_media(&webm_url, &filename, PathBuf::from(out_dir), fps) {
         Ok(()) => 0,
         Err(e) => { set_error(format!("{e:#}")); -1 }
     }

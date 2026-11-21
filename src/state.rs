@@ -272,6 +272,7 @@ fn pen_up(state: &mut ReplayState, ev: &Event) {
         }
     }
     if let Some(p) = pt {
+        let cv = state.canvas(cid);
         cv.pointer = Some(p);
         cv.pointer_us = p_time;
     }

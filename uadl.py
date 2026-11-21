@@ -13,14 +13,13 @@ def find_lib():
 def load_lib():
     path = find_lib()
     if not path: print("[ERROR] libuadl.so not found. Build it with: cargo build --release"); sys.exit(1)
-    lib = ctypes.CDLL(str(path)); lib.uadl_download.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p]; lib.uadl_download.restype = ctypes.c_int; lib.uadl_last_error.restype = ctypes.c_char_p; lib.uadl_version.restype = ctypes.c_char_p
+    lib = ctypes.CDLL(str(path)); lib.uadl_download_media.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p]; lib.uadl_download_media.restype = ctypes.c_int; lib.uadl_last_error.restype = ctypes.c_char_p; lib.uadl_version.restype = ctypes.c_char_p
     print(f"[INFO] Loaded {path} ({lib.uadl_version().decode()})"); return lib
 # =====================[ MAIN ]=====================
 def main():
-    if len(sys.argv) < 2: print("Usage: python uadl.py <class_url_or_uid> [token] [out_dir]"); print("   or: UNACADEMY_TOKEN=... python uadl.py <url> [out_dir]"); sys.exit(1)
-    url = sys.argv[1]; token = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("-") else os.environ.get("UNACADEMY_TOKEN", ""); out = sys.argv[3] if len(sys.argv) > 3 else "."
-    if not token: print("[ERROR] No token. Pass it as arg or set UNACADEMY_TOKEN."); sys.exit(1)
-    lib = load_lib(); print(f"[INFO] Downloading {url} -> {out}"); rc = lib.uadl_download(url.encode(), token.encode(), out.encode())
+    if len(sys.argv) < 4: print("Usage: python uadl.py <webm_url> <filename> <out_dir>"); print("  e.g. python uadl.py 'https://uamedia.uacdn.net/lesson-raw/J9E64LQ1DQIZGOUIJ76D/output.webm' 'Lecture 1' ./downloads"); sys.exit(1)
+    url = sys.argv[1]; filename = sys.argv[2]; out = sys.argv[3]
+    lib = load_lib(); print(f"[INFO] Downloading {url} -> {out}/{filename}.mp4"); rc = lib.uadl_download_media(url.encode(), filename.encode(), out.encode())
     if rc != 0:
         err = lib.uadl_last_error(); msg = err.decode(errors="replace") if err else "unknown error"; print(f"[ERROR] {msg}"); sys.exit(1)
     print("[INFO] Done.")

@@ -56,13 +56,15 @@ impl Canvas {
     }
 }
 // =====================[ SLIDE ]=====================
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Slide {
     pub url: Option<String>,
     pub bg: Option<String>,
     pub background: [u8; 3],
     pub sid: String,
     pub t: i64,
+    pub canvas_i: i64,
+    pub page: i64,
 }
 // =====================[ TRANSFORM ]=====================
 #[derive(Debug, Clone, Default)]
@@ -85,7 +87,9 @@ pub struct Poll {
 }
 // =====================[ REPLAY STATE ]=====================
 pub struct ReplayState {
-    pub slides: HashMap<i64, Slide>,
+    pub slides: Vec<Slide>,
+    pub slide_registry: HashMap<i64, usize>,
+    pub pending_as: Vec<(i64, i64, Slide)>,
     pub canvases: HashMap<i64, Canvas>,
     pub current_slide: i64,
     pub color: [u8; 3],
@@ -114,19 +118,77 @@ impl Default for ReplayState {
 impl ReplayState {
     pub fn new() -> Self {
         ReplayState {
-            slides: HashMap::new(), canvases: HashMap::new(), current_slide: 0,
-            color: hex_to_rgb(DEFAULT_COLOR), mode: MARKER.to_string(), pen_scale: 1.0, eraser_scale: 1.0,
-            t_us: 0, applied: 0, slide_sid: "init".into(), bg_color: [17, 17, 24], bg_image_url: String::new(),
-            rotation: 0.0, gif_url: String::new(), screen_share: false, active_poll: None,
-            completed: Vec::new(), erased_up_to: -1, transform: HashMap::new(), temp_hl: Vec::new(),
+            slides: vec![Slide { url: None, bg: None, background: [17, 17, 24], sid: "init".into(), t: 0, canvas_i: -1, page: -1 }],
+            slide_registry: HashMap::new(),
+            pending_as: Vec::new(),
+            canvases: HashMap::new(),
+            current_slide: 0,
+            color: hex_to_rgb(DEFAULT_COLOR),
+            mode: MARKER.to_string(),
+            pen_scale: 1.0,
+            eraser_scale: 1.0,
+            t_us: 0,
+            applied: 0,
+            slide_sid: "init".into(),
+            bg_color: [17, 17, 24],
+            bg_image_url: String::new(),
+            rotation: 0.0,
+            gif_url: String::new(),
+            screen_share: false,
+            active_poll: None,
+            completed: Vec::new(),
+            erased_up_to: -1,
+            transform: HashMap::new(),
+            temp_hl: Vec::new(),
         }
     }
     pub fn canvas(&mut self, cid: i64) -> &mut Canvas { self.canvases.entry(cid).or_insert_with(Canvas::new) }
     pub fn active(&self) -> Option<&Canvas> { self.canvases.get(&self.current_slide) }
-    pub fn active_slide(&self) -> Option<&Slide> { self.slides.get(&self.current_slide) }
+    pub fn active_slide(&self) -> Option<&Slide> { self.slides.get(self.current_slide as usize) }
 }
 // =====================[ TARGET CANVAS ]=====================
 fn target_canvas(ev: &Event, current_slide: i64) -> i64 { ev.canvas_id.unwrap_or(current_slide) }
+// =====================[ PAGE FROM URL ]=====================
+fn page_from_url(url: &str) -> i64 {
+    if let Some(idx) = url.find("page=") {
+        let rest = &url[idx + 5..];
+        let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        return num.parse().unwrap_or(-1);
+    }
+    -1
+}
+// =====================[ FINALIZE SLIDES ]=====================
+fn finalize_slides(state: &mut ReplayState) {
+    if state.pending_as.is_empty() { return; }
+    let mut pending = std::mem::take(&mut state.pending_as);
+    pending.sort_by_key(|(t, seq, _)| (*t, *seq));
+    let mut blocks: Vec<(i64, Vec<Slide>)> = Vec::new();
+    for (_, _, slide) in pending {
+        if let Some(last) = blocks.last_mut() {
+            if last.0 == slide.canvas_i { last.1.push(slide); continue; }
+        }
+        blocks.push((slide.canvas_i, vec![slide]));
+    }
+    let mut final_list: Vec<Slide> = state.slides.clone();
+    final_list.truncate(1);
+    for (canvas_i, mut items) in blocks {
+        items.sort_by(|a, b| {
+            if a.page >= 0 && b.page >= 0 { a.page.cmp(&b.page) } else { a.t.cmp(&b.t) }
+        });
+        let splice_idx = if canvas_i < 0 { final_list.len() } else { canvas_i as usize };
+        while final_list.len() < splice_idx {
+            final_list.push(Slide::default());
+        }
+        for (offset, item) in items.into_iter().enumerate() {
+            final_list.insert(splice_idx + offset, item);
+        }
+    }
+    for (idx, slide) in final_list.iter().enumerate() {
+        state.slide_registry.insert(idx as i64, idx);
+        state.slide_registry.insert(slide.canvas_i, idx);
+    }
+    state.slides = final_list;
+}
 // =====================[ APPLY EVENT ]=====================
 fn apply_event(state: &mut ReplayState, ev: &Event) {
     state.t_us = ev.p_time;
@@ -172,26 +234,37 @@ fn apply_event(state: &mut ReplayState, ev: &Event) {
         }
         (P_CANVAS, CW_TRANSFORM) => transform_event(state, ev),
         (P_DOC, DC_ADD_SLIDE) => {
-            if let Some(i) = ev.i("i") {
-                let slide = Slide {
-                    url: ev.s("u").map(str::to_string),
-                    bg: ev.s("bg").map(str::to_string),
-                    background: ev.s("bc").map(hex_to_rgb).unwrap_or([255, 255, 255]),
-                    sid: ev.s("uid").unwrap_or("").to_string(),
-                    t: ev.p_time,
-                };
-                state.slides.insert(i, slide);
-            }
+            let url = ev.s("u").unwrap_or("").to_string();
+            let bc = ev.s("bc").map(hex_to_rgb).unwrap_or([255, 255, 255]);
+            let sid = ev.s("uid").unwrap_or("").to_string();
+            let canvas_i = ev.i("i").unwrap_or(-1);
+            let page = page_from_url(&url);
+            let slide = Slide { url: Some(url), bg: None, background: bc, sid, t: ev.p_time, canvas_i, page };
+            state.pending_as.push((ev.p_time, ev.seq, slide));
         }
         (P_DOC, DC_SHOW_SLIDE) => {
             if let Some(s) = ev.i("s") {
-                state.current_slide = s;
-                if let Some(slide) = state.slides.get(&s) {
+                if let Some(&pos) = state.slide_registry.get(&s) {
+                    state.current_slide = pos as i64;
+                } else {
+                    state.current_slide = s;
+                }
+                if let Some(slide) = state.slides.get(state.current_slide as usize) {
                     state.slide_sid = slide.sid.clone();
                     state.bg_color = slide.background;
                     state.bg_image_url = slide.bg.clone().unwrap_or_default();
                     state.rotation = 0.0;
                     state.gif_url.clear();
+                }
+            } else if let Some(obj) = ev.payload.get("s") {
+                if obj.is_object() {
+                    let url = obj.get("u").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let bc = obj.get("bc").and_then(|v| v.as_str()).map(hex_to_rgb).unwrap_or([255, 255, 255]);
+                    let sid = obj.get("uid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let canvas_i = obj.get("i").and_then(as_i64).unwrap_or(-1);
+                    let page = page_from_url(&url);
+                    let slide = Slide { url: Some(url), bg: None, background: bc, sid, t: ev.p_time, canvas_i, page };
+                    state.pending_as.push((ev.p_time, ev.seq, slide));
                 }
             }
         }
@@ -333,6 +406,7 @@ impl ReplayState {
             apply_event(self, &ev);
             self.applied += 1;
         }
+        finalize_slides(self);
         self.t_us = t_us;
     }
 }
@@ -463,6 +537,7 @@ pub fn do_seek(timeline: &Timeline, target_us: i64) -> ReplayState {
         if ev.p_time > target_us { break; }
         apply_event(&mut state, ev);
     }
+    finalize_slides(&mut state);
     let cur_canvas = state.canvases.get(&state.current_slide).cloned();
     if let Some(mut c) = cur_canvas {
         c.zoom = snap.zoom;
@@ -482,6 +557,7 @@ pub fn tick_draw(state: &mut ReplayState, events: &[Event], target_us: i64) -> b
         apply_event(state, &ev);
         state.applied += 1;
     }
+    finalize_slides(state);
     state.t_us = target_us;
     if let Some(cv) = state.canvases.get(&state.current_slide) {
         if cv.revision != 0 { needs_redraw = true; }

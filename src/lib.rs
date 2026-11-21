@@ -11,7 +11,7 @@ pub mod state;
 pub mod yuv;
 // =====================[ IMPORTS ]=====================
 use std::ffi::{c_char, c_int, CStr, CString};
-use std::io::{IsTerminal, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -183,7 +183,9 @@ pub fn run_media(webm_url: &str, filename: &str, out_dir: PathBuf, fps: f64) -> 
         std::fs::read_to_string(&data_path)?
     } else {
         rep.say("Fetching board events ...");
-        let t = agent.get(&data_url).call()?.into_string()?;
+        let resp = agent.get(&data_url).call()?;
+        let mut t = String::new();
+        resp.into_reader().read_to_string(&mut t)?;
         std::fs::write(&data_path, &t)?;
         t
     };

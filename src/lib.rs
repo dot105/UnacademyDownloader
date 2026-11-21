@@ -13,7 +13,7 @@ pub mod yuv;
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use anyhow::{bail, Result};
 use clap::Parser;
@@ -167,13 +167,73 @@ pub fn run_with_args(mut args: Args) -> Result<()> {
     rep.say(&format!("\n-> {}  ({:.0} MB)", final_mp4.display(), size as f64 / 1e6));
     Ok(())
 }
+// =====================[ RUN MEDIA ]=====================
+pub fn run_media(webm_url: &str, filename: &str, out_dir: PathBuf) -> Result<()> {
+    let media_uid = webm_url.split("lesson-raw/").nth(1).and_then(|r| r.split('/').next()).filter(|s| s.len() >= 8).ok_or_else(|| anyhow::anyhow!("no media uid in url: {webm_url}"))?.to_string();
+    let data_url = format!("https://player.uacdn.net/lesson-raw/{media_uid}/data.json");
+    std::fs::create_dir_all(&out_dir)?;
+    let rep = Reporter::new(true);
+    export::require_ffmpeg()?;
+    rep.say(&format!("Media UID: {media_uid}"));
+    let base = out_dir.join(filename);
+    let final_mp4 = base.with_extension("mp4");
+    let data_path = base.with_extension("events.json");
+    let agent = Arc::new(ureq::AgentBuilder::new().timeout_connect(std::time::Duration::from_secs(15)).timeout_read(std::time::Duration::from_secs(120)).user_agent(crate::assets::UA).build());
+    let text = if data_path.is_file() {
+        std::fs::read_to_string(&data_path)?
+    } else {
+        rep.say("Fetching board events ...");
+        let t = agent.get(&data_url).call()?.into_string()?;
+        std::fs::write(&data_path, &t)?;
+        t
+    };
+    let events = model::load_events(&text)?;
+    rep.say(&format!("  {} events", events.len()));
+    let webm = base.with_extension("webm");
+    let have = std::fs::metadata(&webm).map(|m| m.len()).unwrap_or(0);
+    let remote = download::probe(&agent, webm_url).map(|(size, _)| size).unwrap_or(0);
+    if have > 0 && have == remote {
+        rep.say(&format!("Media already downloaded ({:.0} MB)", have as f64 / 1e6));
+    } else {
+        rep.say("Downloading media on 16 connections ...");
+        let bytes = download::download(agent.clone(), webm_url, &webm, 16, |p| rep.line(&format!("  {}", download::bar(p))))?;
+        rep.done(&format!("  downloaded {:.0} MB", bytes as f64 / 1e6));
+    }
+    let duration = ffprobe_duration(&webm)?;
+    rep.say(&format!("Duration: {:.0}s", duration));
+    let jobs = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let width = 1280;
+    let height = ((width as f64 * 9.0 / 16.0).round() as u32) & !1;
+    let opts = export::Options { fps: 12.0, width, height, crf: 28, preset: "superfast".into(), pip: true, zoom: true, start: 0.0, end: None, ..Default::default() };
+    rep.say(&format!("Rendering board at {width}x{height} @ 12fps on {jobs} threads ..."));
+    let slides = SlideCache::new(width);
+    let started = Instant::now();
+    export::export(&events, &final_mp4, Some(&webm), &opts, duration, jobs, &slides, |done, total| {
+        let secs = started.elapsed().as_secs_f64().max(1e-6);
+        let rate = done as f64 / secs;
+        let eta = if rate > 0.0 { ((total - done) as f64 / rate) as u64 } else { 0 };
+        rep.line(&format!("  frame {done}/{total} ({:5.1}%)  {rate:6.1} fps  ETA {}m{:02}s", 100.0 * done as f64 / total as f64, eta / 60, eta % 60));
+    })?;
+    rep.done(&format!("  rendered in {:.0}s", started.elapsed().as_secs_f64()));
+    let _ = std::fs::remove_file(&webm);
+    let _ = std::fs::remove_file(&data_path);
+    let size = std::fs::metadata(&final_mp4).map(|m| m.len()).unwrap_or(0);
+    rep.say(&format!("\n-> {}  ({:.0} MB)", final_mp4.display(), size as f64 / 1e6));
+    Ok(())
+}
+// =====================[ FFPROBE DURATION ]=====================
+fn ffprobe_duration(path: &std::path::Path) -> Result<f64> {
+    let out = std::process::Command::new("ffprobe").args(["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1"]).arg(path).output()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    s.parse::<f64>().map_err(|_| anyhow::anyhow!("ffprobe duration parse failed: {s}"))
+}
 // =====================[ LAST ERROR ]=====================
 static LAST_ERROR: Lazy<Mutex<Option<CString>>> = Lazy::new(|| Mutex::new(None));
 // =====================[ SET ERROR ]=====================
 fn set_error(msg: String) {
     *LAST_ERROR.lock().unwrap() = CString::new(msg).ok();
 }
-// =====================[ DOWNLOAD ]=====================
+// =====================[ DOWNLOAD (API) ]=====================
 #[no_mangle]
 pub extern "C" fn uadl_download(url: *const c_char, token: *const c_char, out_dir: *const c_char) -> c_int {
     if url.is_null() || token.is_null() || out_dir.is_null() {
@@ -186,10 +246,22 @@ pub extern "C" fn uadl_download(url: *const c_char, token: *const c_char, out_di
     let args = args_for_so(url, token, PathBuf::from(out_dir));
     match run_with_args(args) {
         Ok(()) => 0,
-        Err(e) => {
-            set_error(format!("{e:#}"));
-            -1
-        }
+        Err(e) => { set_error(format!("{e:#}")); -1 }
+    }
+}
+// =====================[ DOWNLOAD MEDIA ]=====================
+#[no_mangle]
+pub extern "C" fn uadl_download_media(webm_url: *const c_char, filename: *const c_char, out_dir: *const c_char) -> c_int {
+    if webm_url.is_null() || filename.is_null() || out_dir.is_null() {
+        set_error("null pointer passed to uadl_download_media".into());
+        return -1;
+    }
+    let webm_url = unsafe { CStr::from_ptr(webm_url) }.to_string_lossy().to_string();
+    let filename = unsafe { CStr::from_ptr(filename) }.to_string_lossy().to_string();
+    let out_dir = unsafe { CStr::from_ptr(out_dir) }.to_string_lossy().to_string();
+    match run_media(&webm_url, &filename, PathBuf::from(out_dir)) {
+        Ok(()) => 0,
+        Err(e) => { set_error(format!("{e:#}")); -1 }
     }
 }
 // =====================[ LAST ERROR ]=====================

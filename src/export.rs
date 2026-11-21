@@ -19,7 +19,7 @@ pub struct Options {
 // =====================[ OPTIONS DEFAULT ]=====================
 impl Default for Options {
     fn default() -> Self {
-        Options { fps: 12.0, width: 1280, height: 720, crf: 28, preset: "superfast".into(), pip: true, pip_scale: 0.22, pip_corner: "br".into(), zoom: true, audio: true, threads: 0, start: 0.0, end: None }
+        Options { fps: 12.0, width: 1280, height: 720, crf: 28, preset: "superfast".into(), pip: true, pip_scale: 0.15, pip_corner: "br".into(), zoom: true, audio: true, threads: 0, start: 0.0, end: None }
     }
 }
 // =====================[ OPTIONS THEME ]=====================

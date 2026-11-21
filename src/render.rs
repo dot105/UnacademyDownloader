@@ -182,24 +182,34 @@ fn draw_pointer(frame: &mut Pixmap, state: &ReplayState, canvas: &Canvas, theme:
     if !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) { return None; }
     let cx = x * theme.width as f32;
     let cy = y * theme.height as f32;
-    let r = (9.0 * theme.scale()).max(3.0);
+    let scale = theme.scale();
+    let glow_radius = (16.0 * scale).max(8.0);
+    let rings = 12;
+    for i in (0..rings).rev() {
+        let t = i as f32 / rings as f32;
+        let r = glow_radius * (0.15 + 0.85 * t);
+        let falloff = (1.0 - t).powi(2);
+        let a = (0.55 * falloff * alpha * 255.0) as u8;
+        if a == 0 { continue; }
+        let mut pb = PathBuilder::new();
+        pb.push_circle(cx, cy, r);
+        if let Some(path) = pb.finish() {
+            let mut paint = Paint::default();
+            paint.set_color(Color::from_rgba8(255, 40, 40, a));
+            paint.anti_alias = true;
+            frame.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+        }
+    }
+    let core_r = (3.0 * scale).max(1.5);
     let mut pb = PathBuilder::new();
-    pb.push_circle(cx, cy, r * 1.9);
+    pb.push_circle(cx, cy, core_r);
     if let Some(path) = pb.finish() {
         let mut paint = Paint::default();
-        paint.set_color(Color::from_rgba8(POINTER_GLOW[0], POINTER_GLOW[1], POINTER_GLOW[2], (0.20 * alpha * 255.0) as u8));
+        paint.set_color(Color::from_rgba8(255, 255, 255, (alpha * 255.0) as u8));
         paint.anti_alias = true;
         frame.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
     }
-    let mut pb = PathBuilder::new();
-    pb.push_circle(cx, cy, r);
-    if let Some(path) = pb.finish() {
-        let mut paint = Paint::default();
-        paint.set_color(Color::from_rgba8(POINTER_COLOR[0], POINTER_COLOR[1], POINTER_COLOR[2], (0.75 * alpha * 255.0) as u8));
-        paint.anti_alias = true;
-        frame.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
-    }
-    let pad = r * 2.2;
+    let pad = glow_radius + 2.0;
     Some(((cx - pad).max(0.0) as u32, (cy - pad).max(0.0) as u32, (cx + pad).min(theme.width as f32) as u32, (cy + pad).min(theme.height as f32) as u32))
 }
 // =====================[ APPLY ZOOM ]=====================
